@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from py3dbp import Packer, Bin, Item
 
 # --- CONFIGURACIÓN PÁGINA ---
-st.set_page_config(page_title="Calculadora Logística PRO", layout="wide", page_icon="🚛")
+st.set_page_config(page_title="Calculadora Logística V10", layout="wide", page_icon="📦")
 
 # --- FUNCIONES ---
 @st.cache_data
@@ -13,239 +13,245 @@ def cargar_excel(archivo):
     xls = pd.ExcelFile(archivo)
     return {sheet: pd.read_excel(xls, sheet).rename(columns=lambda x: x.strip()) for sheet in xls.sheet_names}
 
-def corregir_medidas(valor):
-    """Detecta si el usuario puso cm en vez de mm (heurística: si es < 400mm es sospechoso para una butaca)"""
-    if valor > 0 and valor < 200: 
-        return valor * 10
-    return valor
-
-def draw_truck_3d_optimized(bin_obj, width_mm, height_mm, length_mm):
-    """
-    Dibuja el camión HORIZONTAL.
-    Mapeo de Ejes py3dbp -> Plotly:
-    py3dbp X (Ancho) -> Plotly X
-    py3dbp Y (Alto)  -> Plotly Z (Altura/Up)
-    py3dbp Z (Largo) -> Plotly Y (Profundidad)
-    """
+def draw_container_3d(bin_obj, w_mm, h_mm, d_mm, title):
+    """ Dibuja el contenedor/camión en horizontal """
     fig = go.Figure()
     
-    W, H, L = float(width_mm), float(height_mm), float(length_mm)
+    W, H, L = float(w_mm), float(h_mm), float(d_mm)
     
-    # 1. Wireframe del Camión (Solo líneas)
-    # Suelo (Z=0)
+    # 1. Contenedor (Wireframe)
+    # Suelo
     fig.add_trace(go.Scatter3d(x=[0, W, W, 0, 0], y=[0, 0, L, L, 0], z=[0, 0, 0, 0, 0],
                                mode='lines', line=dict(color='black', width=3), name='Suelo', hoverinfo='none'))
-    # Techo (Z=H)
+    # Techo
     fig.add_trace(go.Scatter3d(x=[0, W, W, 0, 0], y=[0, 0, L, L, 0], z=[H, H, H, H, H],
-                               mode='lines', line=dict(color='grey', width=2), name='Techo', hoverinfo='none'))
-    # Pilares
-    for x_c, y_c in [(0,0), (W,0), (W,L), (0,L)]:
-        fig.add_trace(go.Scatter3d(x=[x_c, x_c], y=[y_c, y_c], z=[0, H], mode='lines', line=dict(color='grey', width=2), showlegend=False, hoverinfo='none'))
+                               mode='lines', line=dict(color='lightgrey', width=2), name='Techo', hoverinfo='none'))
+    # Paredes verticales
+    for xc, yc in [(0,0), (W,0), (W,L), (0,L)]:
+        fig.add_trace(go.Scatter3d(x=[xc, xc], y=[yc, yc], z=[0, H], mode='lines', line=dict(color='lightgrey', width=2), showlegend=False, hoverinfo='none'))
 
-    # 2. Cajas (Optimizadas con Scatter3D transparente + Mesh ligero si son pocas)
-    # Para optimizar, usamos Mesh3d pero solo dibujamos si el usuario lo pide
-    
+    # 2. Bultos
     colors = ['#E74C3C', '#3498DB', '#F1C40F', '#2ECC71', '#9B59B6', '#E67E22', '#1ABC9C']
     
     for item in bin_obj.items:
-        # Recuperamos dimensiones originales
-        # En py3dbp (packer): w=Ancho, h=Alto, d=Largo
-        w_box, h_box, d_box = float(item.width), float(item.height), float(item.depth)
-        
-        # Posición original
-        x_pos, y_pos, z_pos = float(item.position[0]), float(item.position[1]), float(item.position[2])
-        
-        # TRUCO: Intercambiamos Y y Z para Plotly
-        # Plotly X = py3dbp X (Ancho)
-        # Plotly Y = py3dbp Z (Largo/Profundidad)
-        # Plotly Z = py3dbp Y (Alto)
-        
-        px = x_pos
-        py = z_pos # SWAP
-        pz = y_pos # SWAP
-        
-        dx = w_box
-        dy = d_box # SWAP dimensión
-        dz = h_box # SWAP dimensión
+        # Recuperar dimensiones originales
+        # Mapeo: py3dbp (w,h,d) -> Plotly (x, z, y)
+        dx, dz, dy = float(item.width), float(item.height), float(item.depth)
+        x, z, y = float(item.position[0]), float(item.position[1]), float(item.position[2])
         
         c = colors[hash(item.name.split('-')[1]) % len(colors)]
         
-        # Dibujamos cubo
         fig.add_trace(go.Mesh3d(
-            x=[px, px+dx, px+dx, px, px, px+dx, px+dx, px],
-            y=[py, py, py+dy, py+dy, py, py, py+dy, py+dy],
-            z=[pz, pz, pz, pz, pz+dz, pz+dz, pz+dz, pz+dz],
+            x=[x, x+dx, x+dx, x, x, x+dx, x+dx, x],
+            y=[y, y, y+dy, y+dy, y, y, y+dy, y+dy],
+            z=[z, z, z, z, z+dz, z+dz, z+dz, z+dz],
             i=[7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2],
             j=[3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3],
             k=[0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
-            color=c, opacity=0.9, flatshading=True, name=item.name, hoverinfo='name'
+            color=c, opacity=1.0, flatshading=True, name=item.name, hoverinfo='name'
         ))
 
-    # Cámara aérea diagonal
     fig.update_layout(
+        title=title,
         scene=dict(
-            xaxis=dict(title='Ancho (mm)', range=[0, W+100], backgroundcolor="#F0F0F0"),
-            yaxis=dict(title='Largo (mm)', range=[0, L+100], backgroundcolor="#F0F0F0"),
-            zaxis=dict(title='Alto (mm)', range=[0, H+100], backgroundcolor="#D0D0D0"),
+            xaxis=dict(title='Ancho (mm)', range=[0, W+100], backgroundcolor="#F4F6F6"),
+            yaxis=dict(title='Largo (mm)', range=[0, L+100], backgroundcolor="#F4F6F6"),
+            zaxis=dict(title='Alto (mm)', range=[0, H+100], backgroundcolor="#E5E8E8"),
             aspectmode='data'
         ),
-        margin=dict(l=0,r=0,b=0,t=0), height=500, showlegend=False
+        margin=dict(l=0,r=0,b=0,t=30), height=500, showlegend=False
     )
     return fig
 
-# --- APP ---
-st.title("🚛 Calculadora Logística PRO")
-
-# Inicialización de estado
+# --- INICIALIZACIÓN DE MEMORIA (SESSION STATE) ---
 if 'pedido' not in st.session_state: st.session_state.pedido = []
+if 'resultados' not in st.session_state: st.session_state.resultados = None # Aquí guardaremos el cálculo
 
-# BARRA LATERAL
-st.sidebar.header("1. Archivo de Datos")
+# --- APP ---
+st.title("🚛 Calculadora Logística Inteligente")
+
+# 1. CARGA
+st.sidebar.header("1. Datos")
 f = st.sidebar.file_uploader("Sube 'datos.xlsx'", type=["xlsx"])
+if not f:
+    st.info("👋 Sube el Excel para empezar."); st.stop()
 
-if f:
-    try:
-        dfs = cargar_excel(f)
-        st.sidebar.success("✅ Excel leído correctamente")
-    except Exception as e:
-        st.error(f"Error al leer Excel: {e}"); st.stop()
+try:
+    dfs = cargar_excel(f)
+    st.sidebar.success("✅ Datos listos")
+except Exception as e:
+    st.error(f"Error: {e}"); st.stop()
 
-    # ZONA DE PEDIDO
-    st.header("2. Composición del Pedido")
+# 2. PEDIDO
+st.header("🛒 Configurar Pedido")
+c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
+with c1: mod = st.selectbox("Modelo", dfs['RECETA_MODELOS']['Nombre_Modelo'].unique())
+with c2: cant = st.number_input("Cantidad", 1, value=50)
+with c3: 
+    st.write(""); st.write("")
+    if st.button("➕ Añadir"): 
+        st.session_state.pedido.append({"Modelo": mod, "Cantidad": cant})
+        st.session_state.resultados = None # Si cambias el pedido, borramos el resultado anterior
+with c4:
+    st.write(""); st.write("")
+    if st.button("🗑️ Borrar"): 
+        st.session_state.pedido = []
+        st.session_state.resultados = None
+        st.rerun()
+
+if st.session_state.pedido:
+    st.dataframe(pd.DataFrame(st.session_state.pedido), use_container_width=True)
+
+st.divider()
+
+# 3. TRANSPORTE
+st.header("⚙️ Configuración")
+cA, cB, cC = st.columns(3)
+with cA: modo = st.radio("Método", ["📦 A Granel", "🧱 Paletizado"], on_change=lambda: st.session_state.update(resultados=None))
+with cB: vehic_nombre = st.selectbox("Vehículo", dfs['VEHICULOS_CONTENEDORES']['Tipo'].unique(), on_change=lambda: st.session_state.update(resultados=None))
+with cC:
+    p_info = None
+    if modo == "🧱 Paletizado":
+        p_nom = st.selectbox("Palet", dfs['PALETS_SOPORTES']['Nombre'].unique(), on_change=lambda: st.session_state.update(resultados=None))
+        p_info = dfs['PALETS_SOPORTES'][dfs['PALETS_SOPORTES']['Nombre'] == p_nom].iloc[0]
+
+# 4. BOTÓN DE CÁLCULO
+if st.button("🚀 CALCULAR", type="primary", disabled=not st.session_state.pedido):
     
-    # Aviso de limpieza
-    if len(st.session_state.pedido) > 0:
-        st.warning(f"⚠️ Tienes {len(st.session_state.pedido)} líneas en el pedido actual. Si quieres calcular algo nuevo, borra primero.")
+    vehiculo = dfs['VEHICULOS_CONTENEDORES'][dfs['VEHICULOS_CONTENEDORES']['Tipo'] == vehic_nombre].iloc[0]
+    items_load = []
     
-    c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
-    with c1: mod = st.selectbox("Modelo", dfs['RECETA_MODELOS']['Nombre_Modelo'].unique())
-    with c2: cant = st.number_input("Nº Butacas", 1, value=50)
-    with c3: 
-        st.write(""); st.write("")
-        if st.button("➕ Añadir"): st.session_state.pedido.append({"Modelo": mod, "Cantidad": cant})
-    with c4:
-        st.write(""); st.write("")
-        if st.button("🗑️ BORRAR", type="primary"): st.session_state.pedido = []; st.rerun()
+    # --- GENERACIÓN DE BULTOS ---
+    with st.spinner("Calculando volúmenes..."):
+        for l in st.session_state.pedido:
+            receta = dfs['RECETA_MODELOS'][dfs['RECETA_MODELOS']['Nombre_Modelo'] == l['Modelo']]
+            for _, row in receta.iterrows():
+                regla = dfs['REGLAS_EMPAQUETADO'][dfs['REGLAS_EMPAQUETADO']['ID_Componente (Qué meto)'] == row['ID_Componente']]
+                if regla.empty: continue
+                
+                caja = dfs['CATALOGO_CAJAS'][dfs['CATALOGO_CAJAS']['ID_Caja'] == regla.iloc[0]['ID_Caja (Dónde lo meto)']].iloc[0]
+                peso_u = dfs['COMPONENTES'][dfs['COMPONENTES']['ID_Componente'] == row['ID_Componente']].iloc[0]['Peso_Neto_Unitario_kg']
+                
+                total_piezas = l['Cantidad'] * row['Cantidad_x_Butaca']
+                piezas_caja = regla.iloc[0]['Cantidad_x_Caja']
+                num_cajas = math.ceil(total_piezas / piezas_caja)
+                
+                if modo == "🧱 Paletizado":
+                    # Lógica Palet
+                    base = int(p_info['Largo_mm'] / caja['Largo_mm']) * int(p_info['Ancho_mm'] / caja['Ancho_mm'])
+                    if base == 0: base = int(p_info['Largo_mm'] / caja['Ancho_mm']) * int(p_info['Ancho_mm'] / caja['Largo_mm'])
+                    
+                    if base == 0: 
+                        st.error(f"Error: La caja {caja['ID_Caja']} es más grande que el palet."); st.stop()
+                    
+                    h_util = vehiculo['Alto_Interior_mm'] * 0.98
+                    capas = min(caja['Max_Apilable'], int((h_util - p_info['Alto_Base_mm'])/caja['Alto_mm']))
+                    if capas < 1: capas = 1
+                    
+                    items_por_palet = base * capas
+                    n_palets = math.ceil(num_cajas / items_por_palet)
+                    
+                    h_p = p_info['Alto_Base_mm'] + (capas * caja['Alto_mm'])
+                    w_p = (items_por_palet * ((piezas_caja*peso_u) + caja['Peso_Vacio_kg'])) + p_info['Peso_Vacio_kg']
+                    
+                    for p in range(n_palets):
+                        items_load.append(Item(f"PAL-{l['Modelo'][:3]}-{row['ID_Componente'][:4]}-{p}", 
+                                               int(p_info['Ancho_mm']), int(h_p), int(p_info['Largo_mm']), float(w_p)))
+                else:
+                    # Granel
+                    w_b = (piezas_caja*peso_u) + caja['Peso_Vacio_kg']
+                    for i in range(num_cajas):
+                        items_load.append(Item(f"CJ-{l['Modelo'][:3]}-{row['ID_Componente'][:4]}-{i}", 
+                                               int(caja['Ancho_mm']), int(caja['Alto_mm']), int(caja['Largo_mm']), float(w_b)))
 
-    # Tabla resumen
-    if st.session_state.pedido:
-        df_show = pd.DataFrame(st.session_state.pedido)
-        df_show['Total Piezas Aprox'] = df_show['Cantidad'] * 4 # Estimación visual
-        st.dataframe(df_show, use_container_width=True)
+    # --- EMPAQUETADO INTELIGENTE (NO 20 CAMIONES FIJOS) ---
+    # 1. Calculamos volumen total de carga
+    vol_total_carga = sum([it.width * it.height * it.depth for it in items_load])
+    vol_camion = float(vehiculo['Ancho_Interior_mm'] * vehiculo['Alto_Interior_mm'] * vehiculo['Largo_Interior_mm'])
+    
+    # Estimamos camiones mínimos (con un factor de eficiencia del 85%)
+    estimacion = math.ceil(vol_total_carga / (vol_camion * 0.85))
+    num_bins_inicial = max(1, estimacion + 1) # Creamos la estimación + 1 de margen, no 20.
+    
+    packer = Packer()
+    # Mapeo: Ancho, Alto, Largo
+    bin_W = int(vehiculo['Ancho_Interior_mm'])
+    bin_H = int(vehiculo['Alto_Interior_mm'])
+    bin_L = int(vehiculo['Largo_Interior_mm'])
+    max_w = int(vehiculo['Carga_Max_kg'])
+    
+    # Usamos el nombre REAL del vehículo seleccionado
+    nombre_vehiculo = vehiculo['Tipo'] 
+    
+    for i in range(num_bins_inicial + 5): # Damos un margen de seguridad pequeño
+        packer.add_bin(Bin(f"{nombre_vehiculo} #{i+1}", bin_W, bin_H, bin_L, max_w))
+    
+    for it in items_load: packer.add_item(it)
+    
+    packer.pack()
+    
+    # Guardamos en MEMORIA (Session State) para que no se borre al clicar
+    st.session_state.resultados = {
+        "bins": [b for b in packer.bins if len(b.items) > 0],
+        "vehiculo": vehiculo,
+        "total_bultos": len(items_load),
+        "unfitted": packer.bins[-1].unfitted_items if packer.bins else []
+    }
 
+# --- 5. MOSTRAR RESULTADOS (DESDE MEMORIA) ---
+if st.session_state.resultados:
+    res = st.session_state.resultados
+    bins_usados = res['bins']
+    vehiculo_info = res['vehiculo']
+    
     st.divider()
-
-    # CONFIGURACIÓN
-    st.header("3. Transporte")
-    cA, cB, cC = st.columns(3)
-    with cA: modo = st.radio("Método", ["📦 A Granel", "🧱 Paletizado"])
-    with cB: vehic = st.selectbox("Vehículo", dfs['VEHICULOS_CONTENEDORES']['Tipo'].unique())
-    with cC:
-        p_info = None
-        if modo == "🧱 Paletizado":
-            p_nom = st.selectbox("Palet", dfs['PALETS_SOPORTES']['Nombre'].unique())
-            p_info = dfs['PALETS_SOPORTES'][dfs['PALETS_SOPORTES']['Nombre'] == p_nom].iloc[0]
-
-    # BOTÓN CALCULAR
-    if st.button("🚀 CALCULAR DISTRIBUCIÓN", type="primary", disabled=not st.session_state.pedido):
+    
+    if not bins_usados and not res['unfitted']:
+        st.warning("El pedido no generó bultos.")
+    elif not bins_usados and res['unfitted']:
+         st.error(f"❌ ERROR CRÍTICO: Ningún bulto cabe en el {vehiculo_info['Tipo']}. \n"
+                  f"El bulto más pequeño mide: {res['unfitted'][0].width}x{res['unfitted'][0].depth}x{res['unfitted'][0].height} mm.\n"
+                  f"El vehículo mide: {vehiculo_info['Ancho_Interior_mm']}x{vehiculo_info['Largo_Interior_mm']}x{vehiculo_info['Alto_Interior_mm']} mm.")
+    else:
+        st.success(f"✅ Se necesitan **{len(bins_usados)}** unidades de **{vehiculo_info['Tipo']}**")
         
-        camion = dfs['VEHICULOS_CONTENEDORES'][dfs['VEHICULOS_CONTENEDORES']['Tipo'] == vehic].iloc[0]
-        items_load = []
+        # Tabs para cada vehículo
+        tabs = st.tabs([b.name for b in bins_usados])
         
-        with st.spinner("Optimizando carga..."):
-            for l in st.session_state.pedido:
-                receta = dfs['RECETA_MODELOS'][dfs['RECETA_MODELOS']['Nombre_Modelo'] == l['Modelo']]
+        for i, b in enumerate(bins_usados):
+            with tabs[i]:
+                # Métricas
+                vol_u = sum([float(it.width)*float(it.height)*float(it.depth) for it in b.items])
+                vol_t = float(b.width)*float(b.height)*float(b.depth)
+                pct = (vol_u/vol_t)*100
+                peso = sum([float(it.weight) for it in b.items])
                 
-                for _, row in receta.iterrows():
-                    regla = dfs['REGLAS_EMPAQUETADO'][dfs['REGLAS_EMPAQUETADO']['ID_Componente (Qué meto)'] == row['ID_Componente']]
-                    if regla.empty: continue
-                    
-                    caja_raw = dfs['CATALOGO_CAJAS'][dfs['CATALOGO_CAJAS']['ID_Caja'] == regla.iloc[0]['ID_Caja (Dónde lo meto)']].iloc[0]
-                    # CORRECCIÓN AUTOMÁTICA DE MEDIDAS (CM -> MM)
-                    caja = caja_raw.copy()
-                    caja['Largo_mm'] = corregir_medidas(caja['Largo_mm'])
-                    caja['Ancho_mm'] = corregir_medidas(caja['Ancho_mm'])
-                    caja['Alto_mm'] = corregir_medidas(caja['Alto_mm'])
-                    
-                    peso_u = dfs['COMPONENTES'][dfs['COMPONENTES']['ID_Componente'] == row['ID_Componente']].iloc[0]['Peso_Neto_Unitario_kg']
-                    
-                    total_piezas = l['Cantidad'] * row['Cantidad_x_Butaca']
-                    piezas_caja = regla.iloc[0]['Cantidad_x_Caja']
-                    num_cajas = math.ceil(total_piezas / piezas_caja)
-                    
-                    if modo == "🧱 Paletizado":
-                        # Lógica Palet
-                        # Intento 1: Normal
-                        base = int(p_info['Largo_mm'] / caja['Largo_mm']) * int(p_info['Ancho_mm'] / caja['Ancho_mm'])
-                        # Intento 2: Rotado
-                        if base == 0:
-                             base = int(p_info['Largo_mm'] / caja['Ancho_mm']) * int(p_info['Ancho_mm'] / caja['Largo_mm'])
-                        
-                        if base == 0: continue # No cabe
-                        
-                        h_util = camion['Alto_Interior_mm'] * 0.95
-                        capas = min(caja['Max_Apilable'], int((h_util - p_info['Alto_Base_mm'])/caja['Alto_mm']))
-                        if capas < 1: capas = 1
-                        
-                        items_por_palet = base * capas
-                        n_palets = math.ceil(num_cajas / items_por_palet)
-                        
-                        h_p = p_info['Alto_Base_mm'] + (capas * caja['Alto_mm'])
-                        w_p = (items_por_palet * ((piezas_caja*peso_u) + caja['Peso_Vacio_kg'])) + p_info['Peso_Vacio_kg']
-                        
-                        for p in range(n_palets):
-                            items_load.append(Item(f"PAL-{l['Modelo'][:3]}-{row['ID_Componente'][:4]}-{p}", 
-                                                   int(p_info['Ancho_mm']), int(h_p), int(p_info['Largo_mm']), float(w_p)))
-                    else:
-                        # Granel
-                        w_b = (piezas_caja*peso_u) + caja['Peso_Vacio_kg']
-                        for i in range(num_cajas):
-                            items_load.append(Item(f"CJ-{l['Modelo'][:3]}-{row['ID_Componente'][:4]}-{i}", 
-                                                   int(caja['Ancho_mm']), int(caja['Alto_mm']), int(caja['Largo_mm']), float(w_b)))
-
-            # Empaquetado
-            packer = Packer()
-            # Mapeo Bin: W=Ancho, H=Alto, D=Largo
-            bin_W, bin_H, bin_L = int(camion['Ancho_Interior_mm']), int(camion['Alto_Interior_mm']), int(camion['Largo_Interior_mm'])
-            max_w = int(camion['Carga_Max_kg'])
-            
-            for i in range(20):
-                packer.add_bin(Bin(f"Camión {i+1}", bin_W, bin_H, bin_L, max_w))
-            
-            for it in items_load: packer.add_item(it)
-            packer.pack()
-            
-            used_bins = [b for b in packer.bins if len(b.items) > 0]
-            
-            st.divider()
-            
-            if not used_bins:
-                st.error("❌ No cabe nada. Revisa las medidas.")
-            else:
-                st.success(f"✅ SE NECESITAN {len(used_bins)} CAMIONES")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Ocupación", f"{round(pct,1)}%")
+                m2.metric("Peso", f"{int(peso)} kg")
+                m3.metric("Bultos", len(b.items))
                 
-                tabs = st.tabs([b.name for b in used_bins])
-                for i, b in enumerate(used_bins):
-                    with tabs[i]:
-                        vol_u = sum([float(it.width)*float(it.height)*float(it.depth) for it in b.items])/1e9
-                        vol_t = (float(b.width)*float(b.height)*float(b.depth))/1e9
-                        peso = sum([float(it.weight) for it in b.items])
-                        
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Ocupación", f"{round((vol_u/vol_t)*100,1)}%")
-                        m2.metric("Peso", f"{int(peso)} kg")
-                        m3.metric("Bultos", len(b.items))
-                        
-                        # CHECKBOX 3D (Para que no cargue lento)
-                        if st.checkbox(f"👁️ Ver Gráfico 3D ({b.name})", key=f"chk_{i}"):
-                            st.plotly_chart(draw_truck_3d_optimized(b, b.width, b.height, b.depth), use_container_width=True)
-                        else:
-                            st.info("Activa la casilla de arriba para ver el gráfico 3D.")
-                        
-                        # Tabla Detalle
-                        det = [{"Ref": it.name, 
-                                "Medidas (Ancho x Largo x Alto)": f"{int(it.width)}x{int(it.depth)}x{int(it.height)}", 
-                                "Peso": f"{int(it.weight)}"} for it in b.items]
-                        st.dataframe(pd.DataFrame(det), use_container_width=True)
-else:
-    st.info("👋 Sube el Excel para comenzar.")
+                # Checkbox para 3D (Ahora NO borra los datos porque se leen de session_state)
+                ver_3d = st.checkbox(f"👁️ Ver 3D ({b.name})", value=True, key=f"chk_{i}")
+                
+                if ver_3d:
+                    # Pasamos dimensiones correctas: Ancho, Alto, Largo
+                    fig = draw_container_3d(b, b.width, b.height, b.depth, b.name)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Tabla
+                det = [{"Ref": it.name, 
+                        "Medidas (Ancho x Largo x Alto)": f"{int(it.width)} x {int(it.depth)} x {int(it.height)}", 
+                        "Peso": f"{int(it.weight)} kg",
+                        "Posición": f"X:{int(float(item.position[0]))} Y:{int(float(item.position[2]))} Z:{int(float(item.position[1]))}"} 
+                       for item in b.items]
+                st.dataframe(pd.DataFrame(det), use_container_width=True)
+        
+        # Mostrar items que no cupieron (si los hay)
+        # Normalmente packer.bins[-1] tiene los unfitted, pero revisamos todos
+        all_unfitted = []
+        for b in packer.bins: 
+             if hasattr(b, 'unfitted_items'): all_unfitted.extend(b.unfitted_items)
+             
+        if all_unfitted:
+            st.error(f"⚠️ Hay {len(all_unfitted)} bultos que no han cabido (revisar tamaños).")
