@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import math
+# Importamos Decimal para gestionar la conversión si es necesario
+from decimal import Decimal
 from py3dbp import Packer, Bin, Item
 
 # Configuración de la página
@@ -56,7 +58,7 @@ if uploaded_file:
     vehiculo_nombre = st.selectbox("Selecciona Vehículo", df_vehiculos['Tipo'].unique())
     datos_camion = df_vehiculos[df_vehiculos['Tipo'] == vehiculo_nombre].iloc[0]
     
-    # Margen de seguridad (Las cajas se abomban)
+    # Margen de seguridad
     holgura = st.slider("Margen de Holgura (%)", 0, 10, 2) / 100
 
     # --- 3. PROCESAMIENTO ---
@@ -98,23 +100,21 @@ if uploaded_file:
             if modo_carga == "📦 A Granel (Cajas sueltas)":
                 peso_bulto = (uds_por_caja * peso_unitario) + caja_data['Peso_Vacio_kg']
                 for i in range(num_cajas_totales):
-                    # CORRECCIÓN: Usamos width, height, depth (inglés estricto)
+                    # Usamos width, height, depth y convertimos a int para asegurar
                     items_para_cargar.append(Item(
                         name=f"{componente_id}-{i}", 
                         width=int(caja_data['Ancho_mm']),
                         height=int(caja_data['Alto_mm']),
                         depth=int(caja_data['Largo_mm']),
-                        weight=peso_bulto
+                        weight=float(peso_bulto)
                     ))
             
             # --- LÓGICA PALETIZADO ---
             else:
-                # 1. Calcular cuántas cajas caben en un palet
                 filas_l = int(info_palet['Largo_mm'] / caja_data['Largo_mm'])
                 filas_a = int(info_palet['Ancho_mm'] / caja_data['Ancho_mm'])
                 base_cajas = filas_l * filas_a
                 
-                # Intentar rotada si cabe mejor
                 if base_cajas == 0:
                      base_cajas = int(info_palet['Largo_mm'] / caja_data['Ancho_mm']) * \
                                   int(info_palet['Ancho_mm'] / caja_data['Largo_mm'])
@@ -123,7 +123,6 @@ if uploaded_file:
                     st.error(f"La caja {caja_id} es más grande que el palet.")
                     st.stop()
                     
-                # 2. Calcular Altura Máxima
                 altura_disponible = alto_camion_util - info_palet['Alto_Base_mm']
                 max_capas_altura = int(altura_disponible / caja_data['Alto_mm'])
                 capas_reales = min(caja_data['Max_Apilable'], max_capas_altura)
@@ -131,7 +130,6 @@ if uploaded_file:
                 cajas_por_palet = base_cajas * capas_reales
                 if cajas_por_palet == 0: cajas_por_palet = 1 
                 
-                # 3. Crear los Palets Virtuales
                 num_palets_necesarios = math.ceil(num_cajas_totales / cajas_por_palet)
                 
                 altura_total_palet = info_palet['Alto_Base_mm'] + (capas_reales * caja_data['Alto_mm'])
@@ -144,13 +142,12 @@ if uploaded_file:
                         width=int(info_palet['Ancho_mm']),
                         height=int(altura_total_palet),
                         depth=int(info_palet['Largo_mm']),
-                        weight=peso_bruto_palet
+                        weight=float(peso_bruto_palet)
                     ))
 
         # B. PROCESO DE CARGA MULTI-CAMIÓN
         packer = Packer()
         
-        # Aplicamos la holgura al camión
         ancho_u = int(datos_camion['Ancho_Interior_mm'] * (1 - holgura))
         alto_u = int(datos_camion['Alto_Interior_mm'] * (1 - holgura))
         largo_u = int(datos_camion['Largo_Interior_mm'] * (1 - holgura))
@@ -186,13 +183,19 @@ if uploaded_file:
                 with tabs[i]:
                     items_dentro = len(b.items)
                     
-                    # CORRECCIÓN: Cálculo manual del volumen usado (evita error get_volume_used)
-                    vol_ocupado_mm3 = sum([item.width * item.height * item.depth for item in b.items])
-                    vol_ocupado_m3 = vol_ocupado_mm3 / 1e9
+                    # CORRECCIÓN DE SEGURIDAD: Convertimos todo a float explícitamente antes de multiplicar/sumar
+                    vol_ocupado_mm3 = sum([float(item.width) * float(item.height) * float(item.depth) for item in b.items])
+                    vol_ocupado_m3 = vol_ocupado_mm3 / 1000000000
                     
-                    vol_total_m3 = (b.width * b.height * b.depth) / 1e9
-                    pct = (vol_ocupado_m3 / vol_total_m3) * 100
-                    peso_total = sum([item.weight for item in b.items])
+                    vol_total_m3 = (float(b.width) * float(b.height) * float(b.depth)) / 1000000000
+                    
+                    # Evitar división por cero
+                    if vol_total_m3 > 0:
+                        pct = (vol_ocupado_m3 / vol_total_m3) * 100
+                    else:
+                        pct = 0
+                    
+                    peso_total = sum([float(item.weight) for item in b.items])
                     
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Bultos a bordo", items_dentro)
@@ -209,7 +212,6 @@ if uploaded_file:
                     for item in b.items:
                         datos_carga.append({
                             "Bulto": item.name,
-                            # CORRECCIÓN: Acceso directo a atributos width/height/depth
                             "Dimensiones (mm)": f"{int(item.width)}x{int(item.height)}x{int(item.depth)}",
                             "Posición (X,Y,Z)": f"{int(float(item.position[0]))}, {int(float(item.position[1]))}, {int(float(item.position[2]))}",
                             "Peso": f"{int(item.weight)} kg"
@@ -217,9 +219,9 @@ if uploaded_file:
                     
                     st.dataframe(pd.DataFrame(datos_carga))
 
-            # Mostrar items que no cupieron
             ultimo_camion = packer.bins[-1]
             if len(ultimo_camion.unfitted_items) > 0:
-                st.error(f"❌ ¡ATENCIÓN! Hay {len(ultimo_camion.unfitted_items)} bultos que NO caben ni en 20 camiones. Probablemente son demasiado grandes.")
+                st.error(f"❌ ¡ATENCIÓN! Hay {len(ultimo_camion.unfitted_items)} bultos que NO caben ni en 20 camiones.")
 else:
     st.info("👋 Sube tu Excel para comenzar.")
+
