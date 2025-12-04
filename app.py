@@ -20,7 +20,7 @@ if uploaded_file:
         df_reglas = pd.read_excel(xls, "REGLAS_EMPAQUETADO")
         df_receta = pd.read_excel(xls, "RECETA_MODELOS")
         df_vehiculos = pd.read_excel(xls, "VEHICULOS_CONTENEDORES")
-        df_palets = pd.read_excel(xls, "PALETS_SOPORTES") # Necesario para palets
+        df_palets = pd.read_excel(xls, "PALETS_SOPORTES")
         df_comp = pd.read_excel(xls, "COMPONENTES")
         
         # Limpieza de columnas
@@ -68,7 +68,7 @@ if uploaded_file:
         
         st.spinner("Generando bultos y paletizando virtualmente...")
         
-        # Dimensiones útiles del camión (para limitar altura de palets)
+        # Dimensiones útiles del camión
         alto_camion_util = datos_camion['Alto_Interior_mm'] * (1 - holgura)
         
         for index, row in receta_modelo.iterrows():
@@ -83,7 +83,9 @@ if uploaded_file:
             uds_por_caja = regla.iloc[0]['Cantidad_x_Caja']
             
             # Info Caja
-            caja_data = df_cajas[df_cajas['ID_Caja'] == caja_id].iloc[0]
+            filtro_caja = df_cajas[df_cajas['ID_Caja'] == caja_id]
+            if filtro_caja.empty: st.error(f"Caja {caja_id} no encontrada"); st.stop()
+            caja_data = filtro_caja.iloc[0]
             
             # Info Peso Componente
             comp_data = df_comp[df_comp['ID_Componente'] == componente_id]
@@ -96,19 +98,18 @@ if uploaded_file:
             if modo_carga == "📦 A Granel (Cajas sueltas)":
                 peso_bulto = (uds_por_caja * peso_unitario) + caja_data['Peso_Vacio_kg']
                 for i in range(num_cajas_totales):
+                    # CORRECCIÓN AQUÍ: Usamos width, height, depth (inglés)
                     items_para_cargar.append(Item(
-                        partno=f"{componente_id}-{i}",
-                        name=f"Caja {componente_id}",
-                        typeof='cube',
-                        w=int(caja_data['Ancho_mm']),
-                        h=int(caja_data['Alto_mm']),
-                        d=int(caja_data['Largo_mm']),
+                        name=f"{componente_id}-{i}", # ID único como nombre
+                        width=int(caja_data['Ancho_mm']),
+                        height=int(caja_data['Alto_mm']),
+                        depth=int(caja_data['Largo_mm']),
                         weight=peso_bulto
                     ))
             
             # --- LÓGICA PALETIZADO ---
             else:
-                # 1. Calcular cuántas cajas caben en un palet (Base)
+                # 1. Calcular cuántas cajas caben en un palet
                 filas_l = int(info_palet['Largo_mm'] / caja_data['Largo_mm'])
                 filas_a = int(info_palet['Ancho_mm'] / caja_data['Ancho_mm'])
                 base_cajas = filas_l * filas_a
@@ -128,6 +129,7 @@ if uploaded_file:
                 capas_reales = min(caja_data['Max_Apilable'], max_capas_altura)
                 
                 cajas_por_palet = base_cajas * capas_reales
+                if cajas_por_palet == 0: cajas_por_palet = 1 # Evitar división cero
                 
                 # 3. Crear los Palets Virtuales
                 num_palets_necesarios = math.ceil(num_cajas_totales / cajas_por_palet)
@@ -136,30 +138,27 @@ if uploaded_file:
                 peso_neto_palet = (cajas_por_palet * ((uds_por_caja * peso_unitario) + caja_data['Peso_Vacio_kg']))
                 peso_bruto_palet = peso_neto_palet + info_palet['Peso_Vacio_kg']
                 
-                # Crear Items "Palet" para el optimizador
                 for p in range(num_palets_necesarios):
-                    # Identificar si es el último palet (puede ir menos lleno, pero ocupa lo mismo de volumen o menos altura)
-                    # Simplificación: Asumimos altura completa para seguridad
+                    # CORRECCIÓN AQUÍ: Usamos width, height, depth
                     items_para_cargar.append(Item(
-                        partno=f"PAL-{componente_id}-{p}",
-                        name=f"Palet {componente_id}",
-                        typeof='cube',
-                        w=int(info_palet['Ancho_mm']),
-                        h=int(altura_total_palet), # Altura real calculada
-                        d=int(info_palet['Largo_mm']),
+                        name=f"PAL-{componente_id}-{p}",
+                        width=int(info_palet['Ancho_mm']),
+                        height=int(altura_total_palet),
+                        depth=int(info_palet['Largo_mm']),
                         weight=peso_bruto_palet
                     ))
 
         # B. PROCESO DE CARGA MULTI-CAMIÓN
         packer = Packer()
-        # Añadimos muchos camiones (Bins) potenciales (ej. 10 camiones). El algoritmo usará el 1, luego el 2...
+        
         # Aplicamos la holgura al camión
         ancho_u = int(datos_camion['Ancho_Interior_mm'] * (1 - holgura))
         alto_u = int(datos_camion['Alto_Interior_mm'] * (1 - holgura))
         largo_u = int(datos_camion['Largo_Interior_mm'] * (1 - holgura))
         carga_u = int(datos_camion['Carga_Max_kg'])
 
-        for i in range(20): # Límite de 20 camiones para evitar bucles infinitos
+        # Creamos 20 camiones potenciales
+        for i in range(20): 
             packer.add_bin(Bin(f"Camión {i+1}", ancho_u, alto_u, largo_u, carga_u))
 
         # Añadir todos los ítems
@@ -177,43 +176,47 @@ if uploaded_file:
             if len(b.items) > 0:
                 camiones_usados.append(b)
 
-        st.metric("TOTAL CAMIONES NECESARIOS", len(camiones_usados))
-        
-        # Detalle por camión
-        tabs = st.tabs([b.name for b in camiones_usados])
-        
-        for i, b in enumerate(camiones_usados):
-            with tabs[i]:
-                items_dentro = len(b.items)
-                vol_ocupado = b.get_volume_used() / 1e9
-                vol_total = (b.width * b.height * b.depth) / 1e9
-                pct = (vol_ocupado / vol_total) * 100
-                peso_total = sum([item.weight for item in b.items])
-                
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Bultos a bordo", items_dentro)
-                c2.metric("Ocupación Volumétrica", f"{round(pct, 2)}%")
-                c3.metric("Peso Total", f"{int(peso_total)} kg", f"Máx {datos_camion['Carga_Max_kg']}")
-                
-                st.progress(pct/100)
-                
-                if peso_total > datos_camion['Carga_Max_kg']:
-                    st.error("⚠️ Este camión excede el peso máximo permitido.")
-                
-                # Tabla detallada de qué lleva este camión
-                datos_carga = []
-                for item in b.items:
-                    datos_carga.append({
-                        "Bulto": item.name,
-                        "Dimensiones (mm)": f"{item.get_dimension()[0]}x{item.get_dimension()[1]}x{item.get_dimension()[2]}",
-                        "Posición (X,Y,Z)": f"{int(float(item.position[0]))}, {int(float(item.position[1]))}, {int(float(item.position[2]))}",
-                        "Peso": f"{int(item.weight)} kg"
-                    })
-                
-                st.dataframe(pd.DataFrame(datos_carga))
+        if len(camiones_usados) == 0:
+             st.warning("No se ha podido cargar ningún bulto. Revisa si los bultos son más grandes que el camión.")
+        else:
+            st.metric("TOTAL CAMIONES NECESARIOS", len(camiones_usados))
+            
+            tabs = st.tabs([b.name for b in camiones_usados])
+            
+            for i, b in enumerate(camiones_usados):
+                with tabs[i]:
+                    items_dentro = len(b.items)
+                    vol_ocupado = b.get_volume_used() / 1e9
+                    vol_total = (b.width * b.height * b.depth) / 1e9
+                    pct = (vol_ocupado / vol_total) * 100
+                    peso_total = sum([item.weight for item in b.items])
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Bultos a bordo", items_dentro)
+                    c2.metric("Ocupación Volumétrica", f"{round(pct, 2)}%")
+                    c3.metric("Peso Total", f"{int(peso_total)} kg", f"Máx {datos_camion['Carga_Max_kg']}")
+                    
+                    st.progress(min(pct/100, 1.0))
+                    
+                    if peso_total > datos_camion['Carga_Max_kg']:
+                        st.error("⚠️ Este camión excede el peso máximo permitido.")
+                    
+                    # Tabla detallada corregida
+                    datos_carga = []
+                    for item in b.items:
+                        datos_carga.append({
+                            "Bulto": item.name,
+                            # CORRECCIÓN: Usamos .width, .height directamente
+                            "Dimensiones (mm)": f"{int(item.width)}x{int(item.height)}x{int(item.depth)}",
+                            "Posición (X,Y,Z)": f"{int(float(item.position[0]))}, {int(float(item.position[1]))}, {int(float(item.position[2]))}",
+                            "Peso": f"{int(item.weight)} kg"
+                        })
+                    
+                    st.dataframe(pd.DataFrame(datos_carga))
 
-        # Mostrar items que no cupieron ni en 20 camiones (Error raro)
-        if len(camiones_usados) > 0 and len(camiones_usados[-1].unfitted_items) > 0:
-            st.error("❌ Hay bultos que no caben en ningún camión (probablemente son más grandes que el propio camión).")
+            # Mostrar items que no cupieron
+            ultimo_camion = packer.bins[-1]
+            if len(ultimo_camion.unfitted_items) > 0:
+                st.error(f"❌ ¡ATENCIÓN! Hay {len(ultimo_camion.unfitted_items)} bultos que NO caben ni en 20 camiones. Probablemente son demasiado grandes.")
 else:
     st.info("👋 Sube tu Excel para comenzar.")
