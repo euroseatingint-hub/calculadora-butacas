@@ -7,7 +7,7 @@ from py3dbp import Packer, Bin, Item
 st.set_page_config(page_title="Planificador Logístico Maestro", layout="wide", page_icon="🚛")
 
 st.title("🚛 Planificador Maestro: Multi-Camión y Paletización")
-st.markdown("Calcula automáticamente cuántos camiones necesitas y optimiza la carga (Tetris 3D).")
+st.markdown("Calcula automáticamente cuántos camiones necesitas y optimiza la carga.")
 
 # --- 1. CARGA DE DATOS ---
 st.sidebar.header("1. Carga de Datos")
@@ -98,9 +98,9 @@ if uploaded_file:
             if modo_carga == "📦 A Granel (Cajas sueltas)":
                 peso_bulto = (uds_por_caja * peso_unitario) + caja_data['Peso_Vacio_kg']
                 for i in range(num_cajas_totales):
-                    # CORRECCIÓN AQUÍ: Usamos width, height, depth (inglés)
+                    # CORRECCIÓN: Usamos width, height, depth (inglés estricto)
                     items_para_cargar.append(Item(
-                        name=f"{componente_id}-{i}", # ID único como nombre
+                        name=f"{componente_id}-{i}", 
                         width=int(caja_data['Ancho_mm']),
                         height=int(caja_data['Alto_mm']),
                         depth=int(caja_data['Largo_mm']),
@@ -129,7 +129,7 @@ if uploaded_file:
                 capas_reales = min(caja_data['Max_Apilable'], max_capas_altura)
                 
                 cajas_por_palet = base_cajas * capas_reales
-                if cajas_por_palet == 0: cajas_por_palet = 1 # Evitar división cero
+                if cajas_por_palet == 0: cajas_por_palet = 1 
                 
                 # 3. Crear los Palets Virtuales
                 num_palets_necesarios = math.ceil(num_cajas_totales / cajas_por_palet)
@@ -139,7 +139,6 @@ if uploaded_file:
                 peso_bruto_palet = peso_neto_palet + info_palet['Peso_Vacio_kg']
                 
                 for p in range(num_palets_necesarios):
-                    # CORRECCIÓN AQUÍ: Usamos width, height, depth
                     items_para_cargar.append(Item(
                         name=f"PAL-{componente_id}-{p}",
                         width=int(info_palet['Ancho_mm']),
@@ -186,9 +185,13 @@ if uploaded_file:
             for i, b in enumerate(camiones_usados):
                 with tabs[i]:
                     items_dentro = len(b.items)
-                    vol_ocupado = b.get_volume_used() / 1e9
-                    vol_total = (b.width * b.height * b.depth) / 1e9
-                    pct = (vol_ocupado / vol_total) * 100
+                    
+                    # CORRECCIÓN: Cálculo manual del volumen usado (evita error get_volume_used)
+                    vol_ocupado_mm3 = sum([item.width * item.height * item.depth for item in b.items])
+                    vol_ocupado_m3 = vol_ocupado_mm3 / 1e9
+                    
+                    vol_total_m3 = (b.width * b.height * b.depth) / 1e9
+                    pct = (vol_ocupado_m3 / vol_total_m3) * 100
                     peso_total = sum([item.weight for item in b.items])
                     
                     c1, c2, c3 = st.columns(3)
@@ -201,12 +204,12 @@ if uploaded_file:
                     if peso_total > datos_camion['Carga_Max_kg']:
                         st.error("⚠️ Este camión excede el peso máximo permitido.")
                     
-                    # Tabla detallada corregida
+                    # Tabla detallada
                     datos_carga = []
                     for item in b.items:
                         datos_carga.append({
                             "Bulto": item.name,
-                            # CORRECCIÓN: Usamos .width, .height directamente
+                            # CORRECCIÓN: Acceso directo a atributos width/height/depth
                             "Dimensiones (mm)": f"{int(item.width)}x{int(item.height)}x{int(item.depth)}",
                             "Posición (X,Y,Z)": f"{int(float(item.position[0]))}, {int(float(item.position[1]))}, {int(float(item.position[2]))}",
                             "Peso": f"{int(item.weight)} kg"
