@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from py3dbp import Packer, Bin, Item
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Planificador Logístico V18", layout="wide", page_icon="🚛")
+st.set_page_config(page_title="Planificador Logístico V19", layout="wide", page_icon="🚛")
 
 # --- FUNCIONES GRÁFICAS (REALISTAS) ---
 def get_cube_edges(x, y, z, dx, dy, dz):
@@ -94,7 +94,7 @@ if st.sidebar.button("🗑️ RESETEAR APP", type="primary"):
     st.session_state.clear()
     st.rerun()
 
-st.title("🚛 Planificador Logístico V18 (Estable)")
+st.title("🚛 Planificador Logístico V19 (Ordenado)")
 
 if 'pedido' not in st.session_state: st.session_state.pedido = []
 
@@ -184,13 +184,11 @@ if f:
 
         if not items_load: st.error("No hay carga válida."); st.stop()
 
-        # KPIs PREVIOS
-        vol_camion = float(vehiculo['Ancho_Interior_mm']*vehiculo['Alto_Interior_mm']*vehiculo['Largo_Interior_mm'])
-        st.info(f"📊 Volumen Carga: **{round(volumen_total/1e9, 2)} m³** | Capacidad Vehículo: **{round(vol_camion/1e9, 2)} m³**")
-
-        # SORTING Y PACKING (ESTÁNDAR PARA EVITAR CRASH)
-        # Ordenar por volumen para simular gravedad
-        items_load.sort(key=lambda x: x.width * x.height * x.depth, reverse=True)
+        # ESTRATEGIA DE ORDENACIÓN "ANTI-FLOTACIÓN"
+        # 1. Ordenamos por Área de Base (Largo x Ancho) Descendente.
+        #    Esto asegura que los bultos con más "suelo" se coloquen primero, creando una base sólida.
+        # 2. Si las bases son iguales, ordena por Altura Descendente.
+        items_load.sort(key=lambda x: (x.width * x.depth, x.height), reverse=True)
         
         packer = Packer()
         # Solo 1 camión en modo análisis
@@ -207,9 +205,9 @@ if f:
         c1.metric("Bultos DENTRO", len(b.items))
         c2.metric("Bultos FUERA", len(b.unfitted_items), delta_color="inverse")
         
-        # Corrección del cálculo de porcentaje (evitar TypeError)
         v_real = sum([float(i.width) * float(i.height) * float(i.depth) for i in b.items])
-        try:
+        try: 
+            vol_camion = float(vehiculo['Ancho_Interior_mm']*vehiculo['Alto_Interior_mm']*vehiculo['Largo_Interior_mm'])
             pct = (v_real / vol_camion) * 100
         except: pct = 0
             
@@ -222,6 +220,19 @@ if f:
         else:
             st.warning("Camión vacío.")
 
+        # TABLA RECUPERADA (LISTADO INFERIOR)
+        st.subheader("📋 Listado Detallado de Carga")
+        if len(b.items) > 0:
+            data_list = []
+            for item in b.items:
+                data_list.append({
+                    "Referencia": item.name,
+                    "Dimensiones (mm)": f"{int(item.width)} x {int(item.depth)} x {int(item.height)}", # Visualmente L x W x H
+                    "Peso (kg)": f"{int(item.weight)}",
+                    "Posición (X, Y, Z)": f"{int(float(item.position[0]))}, {int(float(item.position[2]))}, {int(float(item.position[1]))}"
+                })
+            st.dataframe(pd.DataFrame(data_list), use_container_width=True)
+
         if b.unfitted_items:
             st.error(f"❌ {len(b.unfitted_items)} bultos no han cabido.")
             with st.expander("Ver lista de sobrantes"):
@@ -229,3 +240,4 @@ if f:
                 st.dataframe(pd.DataFrame(d))
 else:
     st.info("Sube Excel.")
+
