@@ -3,62 +3,79 @@ import pandas as pd
 import math
 import plotly.graph_objects as go
 from py3dbp import Packer, Bin, Item
+from decimal import Decimal
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Analizador Logístico V16", layout="wide", page_icon="🚛")
+st.set_page_config(page_title="Planificador Logístico V17", layout="wide", page_icon="🚛")
 
-# --- FUNCIONES GRÁFICAS (SÓLIDAS) ---
+# --- CLASE PERSONALIZADA: CONTENEDOR SIN VUELCOS ---
+class RotationLimitedBin(Bin):
+    """
+    Versión modificada del Bin de py3dbp que restringe la rotación.
+    Solo permite rotar sobre el eje Z (manteniendo la altura vertical).
+    Evita que los palets o cajas se tumben de lado.
+    """
+    def put_item(self, item, pivot):
+        valid_item_position = False
+        item.position = pivot
+        
+        # Rotaciones estándar de py3dbp:
+        # 0: (w, h, d) -> Normal
+        # 1: (h, w, d) -> Tumbado
+        # 2: (h, d, w) -> Tumbado
+        # 3: (d, h, w) -> Girado 90º (Altura se mantiene en el eje H). ¡ESTA ES LA BUENA!
+        # 4: (d, w, h) -> Tumbado
+        # 5: (w, d, h) -> Tumbado
+        
+        # Solo probamos la 0 (Original) y la 3 (Girada 90º sobre el suelo)
+        allowed_rotations = [0, 3] 
+        
+        for i in allowed_rotations:
+            item.rotation_type = i
+            dimension = item.get_dimension()
+            if self.can_hold(item):
+                valid_item_position = True
+                break
+        return valid_item_position
+
+# --- FUNCIONES GRÁFICAS ---
 def get_cube_edges(x, y, z, dx, dy, dz):
-    """ Retorna las coordenadas de las líneas negras (bordes) """
-    # Base
-    xe = [x, x+dx, x+dx, x, x, None]
-    ye = [y, y, y+dy, y+dy, y, None]
-    ze = [z, z, z, z, z, None]
-    # Techo
-    xe += [x, x+dx, x+dx, x, x, None]
-    ye += [y, y, y+dy, y+dy, y, None]
-    ze += [z+dz, z+dz, z+dz, z+dz, z+dz, None]
-    # Pilares
-    xe += [x, x, None, x+dx, x+dx, None, x+dx, x+dx, None, x, x, None]
-    ye += [y, y, None, y, y, None, y+dy, y+dy, None, y+dy, y+dy, None]
-    ze += [z, z+dz, None, z, z+dz, None, z, z+dz, None, z, z+dz, None]
+    """ Coordenadas para wireframe (bordes negros) """
+    v = [[x, y, z], [x+dx, y, z], [x+dx, y+dy, z], [x, y+dy, z],
+         [x, y, z+dz], [x+dx, y, z+dz], [x+dx, y+dy, z+dz], [x, y+dy, z+dz]]
+    xe, ye, ze = [], [], []
+    # Base, Techo, Verticales
+    for i, j in [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]:
+        xe.extend([v[i][0], v[j][0], None])
+        ye.extend([v[i][1], v[j][1], None])
+        ze.extend([v[i][2], v[j][2], None])
     return xe, ye, ze
 
-def draw_truck_analysis(bin_obj, w, h, d):
+def draw_truck_final(bin_obj, w, h, d):
     fig = go.Figure()
     W, H, L = float(w), float(h), float(d)
 
-    # 1. El Contenedor (Sólido translúcido para referencia)
+    # 1. Contenedor
     fig.add_trace(go.Mesh3d(
-        x=[0, W, W, 0, 0, W, W, 0],
-        y=[0, 0, L, L, 0, 0, L, L],
-        z=[0, 0, 0, 0, H, H, H, H],
-        i=[7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2],
-        j=[3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3],
-        k=[0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
-        color='gray', opacity=0.1, name='Espacio Aéreo'
+        x=[0, W, W, 0, 0, W, W, 0], y=[0, 0, L, L, 0, 0, L, L], z=[0, 0, 0, 0, H, H, H, H],
+        i=[7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2], j=[3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3], k=[0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
+        color='gray', opacity=0.1, name='Espacio'
     ))
-    
-    # Bordes del contenedor
+    # Límites
     lx, ly, lz = get_cube_edges(0, 0, 0, W, L, H)
-    fig.add_trace(go.Scatter3d(x=lx, y=ly, z=lz, mode='lines', line=dict(color='black', width=5), name='Límites Camión', hoverinfo='none'))
+    fig.add_trace(go.Scatter3d(x=lx, y=ly, z=lz, mode='lines', line=dict(color='black', width=5), hoverinfo='none'))
 
     # 2. Cajas
-    # Colores fijos
-    colors = {'asiento': '#E74C3C', 'respaldo': '#3498DB', 'carcasa': '#F1C40F', 'costado': '#8E44AD', 'pal': '#795548', 'base': '#95A5A6'}
-    fallback = ['#16A085', '#D35400', '#2C3E50', '#8E44AD']
+    color_map = {'asiento': '#E74C3C', 'respaldo': '#3498DB', 'carcasa': '#F1C40F', 'costado': '#8E44AD', 'pal': '#795548', 'base': '#95A5A6'}
+    fallback = ['#16A085', '#D35400', '#2C3E50', '#27AE60']
 
     for i, item in enumerate(bin_obj.items):
-        # Mapeo: py3dbp (w,h,d) -> Plotly (x, z, y)
-        # width -> X (Ancho)
-        # height -> Z (Alto)
-        # depth -> Y (Largo/Profundidad)
+        # Mapeo: width->X, height->Z, depth->Y
         dx, dz, dy = float(item.width), float(item.height), float(item.depth)
         x, z, y = float(item.position[0]), float(item.position[1]), float(item.position[2])
-
-        # Color
+        
         c = fallback[i % len(fallback)]
-        for k, v in colors.items():
+        for k, v in color_map.items():
             if k in item.name.lower(): c = v; break
 
         # Cubo Sólido
@@ -71,21 +88,17 @@ def draw_truck_analysis(bin_obj, w, h, d):
             k=[0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
             color=c, opacity=1.0, flatshading=True, name=item.name, hoverinfo='name'
         ))
-        
-        # Bordes Negros
+        # Bordes
         ex, ey, ez = get_cube_edges(x, y, z, dx, dy, dz)
         fig.add_trace(go.Scatter3d(x=ex, y=ey, z=ez, mode='lines', line=dict(color='black', width=3), showlegend=False, hoverinfo='skip'))
 
     fig.update_layout(
         scene=dict(
-            xaxis=dict(title='Ancho (X)', range=[0, W*1.05], backgroundcolor="#ffffff", gridcolor="#cccccc"),
-            yaxis=dict(title='Largo (Y)', range=[0, L*1.05], backgroundcolor="#ffffff", gridcolor="#cccccc"),
-            zaxis=dict(title='Alto (Z)', range=[0, H*1.05], backgroundcolor="#eeeeee", gridcolor="white"),
-            aspectmode='data',
-            camera=dict(eye=dict(x=1.5, y=-1.5, z=1.5))
-        ),
-        margin=dict(l=0, r=0, b=0, t=30), height=700,
-        title="Vista 3D: Eje Z es la Altura (Gravedad)"
+            xaxis=dict(title='Ancho (mm)', range=[0, W*1.05]),
+            yaxis=dict(title='Largo (mm)', range=[0, L*1.05]),
+            zaxis=dict(title='Alto (mm)', range=[0, H*1.05]),
+            aspectmode='data', camera=dict(eye=dict(x=1.6, y=-1.6, z=1.2))
+        ), margin=dict(l=0,r=0,b=0,t=30), height=700, title=f"Vista 3D: {bin_obj.name}"
     )
     return fig
 
@@ -107,7 +120,7 @@ st.sidebar.title("🛠️ Panel Control")
 if st.sidebar.button("🗑️ RESETEAR APP", type="primary"):
     st.session_state.clear(); st.rerun()
 
-st.title("🚛 Analizador de Carga V16 (Modo Detallado)")
+st.title("🚛 Planificador Logístico V17 (Anti-Vuelco)")
 
 if 'pedido' not in st.session_state: st.session_state.pedido = []
 
@@ -118,7 +131,7 @@ if f:
     except: st.error("Error Excel"); st.stop()
 
     # 2. PEDIDO
-    st.header("1. Tu Pedido")
+    st.header("1. Pedido")
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1: mod = st.selectbox("Modelo", dfs['RECETA_MODELOS']['Nombre_Modelo'].unique())
     with c2: cant = st.number_input("Cantidad", 1, value=50)
@@ -128,12 +141,12 @@ if f:
 
     if st.session_state.pedido:
         st.dataframe(pd.DataFrame(st.session_state.pedido), use_container_width=True)
-        if st.button("Limpiar Lista"): st.session_state.pedido = []; st.rerun()
+        if st.button("Borrar Lista"): st.session_state.pedido = []; st.rerun()
     
     st.divider()
 
     # 3. TRANSPORTE
-    st.header("2. Vehículo y Formato")
+    st.header("2. Transporte")
     ca, cb, cc = st.columns(3)
     with ca: modo = st.radio("Formato", ["📦 A Granel", "🧱 Paletizado"])
     with cb: vehic_nom = st.selectbox("Vehículo", dfs['VEHICULOS_CONTENEDORES']['Tipo'].unique())
@@ -144,14 +157,11 @@ if f:
             p_info = dfs['PALETS_SOPORTES'][dfs['PALETS_SOPORTES']['Nombre'] == p_nom].iloc[0]
 
     # 4. CÁLCULO
-    if st.button("🚀 ANALIZAR CARGA (1 CAMIÓN)", type="primary", disabled=not st.session_state.pedido):
+    if st.button("🚀 ANALIZAR CARGA", type="primary", disabled=not st.session_state.pedido):
         
         vehiculo = dfs['VEHICULOS_CONTENEDORES'][dfs['VEHICULOS_CONTENEDORES']['Tipo'] == vehic_nom].iloc[0]
-        
-        # A. GENERAR BULTOS
         items_load = []
-        volumen_carga_total = 0
-        peso_carga_total = 0
+        volumen_total = 0
         
         with st.spinner("Generando bultos..."):
             for l in st.session_state.pedido:
@@ -159,11 +169,9 @@ if f:
                 for _, row in receta.iterrows():
                     regla = buscar_regla(row['ID_Componente'], dfs['REGLAS_EMPAQUETADO'])
                     if regla is None: continue
-                    
                     try: caja = dfs['CATALOGO_CAJAS'][dfs['CATALOGO_CAJAS']['ID_Caja'] == regla['ID_Caja (Dónde lo meto)']].iloc[0]
                     except: continue
 
-                    # Corrección MM
                     L, W, H = caja['Largo_mm'], caja['Ancho_mm'], caja['Alto_mm']
                     if L < 200: L*=10; W*=10; H*=10
                     
@@ -191,68 +199,53 @@ if f:
                         
                         for p in range(n_palets):
                             items_load.append(Item(f"PAL-{row['ID_Componente'][:4]}-{p}", int(p_info['Ancho_mm']), int(h_final), int(p_info['Largo_mm']), float(w_p)))
-                            volumen_carga_total += (int(p_info['Ancho_mm']) * int(h_final) * int(p_info['Largo_mm']))
-                            peso_carga_total += w_p
+                            volumen_total += (int(p_info['Ancho_mm']) * int(h_final) * int(p_info['Largo_mm']))
                     else:
                         w_b = (piezas_caja*peso_u) + caja['Peso_Vacio_kg']
                         for i in range(num_cajas):
                             items_load.append(Item(f"CJ-{row['ID_Componente'][:4]}-{i}", int(W), int(H), int(L), float(w_b)))
-                            volumen_carga_total += (int(W) * int(H) * int(L))
-                            peso_carga_total += w_b
+                            volumen_total += (int(W) * int(H) * int(L))
 
         if not items_load: st.error("No hay carga."); st.stop()
 
-        # B. ANÁLISIS DE VOLUMEN (KPIs)
+        # KPIs PREVIOS
         vol_camion = float(vehiculo['Ancho_Interior_mm']*vehiculo['Alto_Interior_mm']*vehiculo['Largo_Interior_mm'])
-        pct_ocupacion_teorica = (volumen_carga_total / vol_camion) * 100
-        
-        st.info(f"""
-        📊 **ANÁLISIS DE VIABILIDAD (ANTES DE CARGAR)**
-        - Volumen de tu Carga: **{round(volumen_carga_total/1e9, 2)} m³**
-        - Capacidad del Vehículo: **{round(vol_camion/1e9, 2)} m³**
-        - Ocupación Teórica: **{round(pct_ocupacion_teorica, 1)}%**
-        """)
+        st.info(f"📊 Volumen Carga: **{round(volumen_total/1e9, 2)} m³** | Capacidad Vehículo: **{round(vol_camion/1e9, 2)} m³**")
 
-        # C. PACKING (SOLO 1 CAMIÓN)
-        # Ordenamos por AREA DE LA BASE (Ancho x Largo) descendente para crear "Suelo"
-        # py3dbp: w=Ancho, h=Alto, d=Largo -> Base = w * d
+        # SORTING Y PACKING
         items_load.sort(key=lambda x: x.width * x.depth, reverse=True)
-
+        
+        # IMPORTANTE: Usamos RotationLimitedBin en lugar de Bin normal
         packer = Packer()
-        # Solo 1 bin para analizar por qué falla o cómo queda
-        packer.add_bin(Bin(vehiculo['Tipo'], int(vehiculo['Ancho_Interior_mm']), int(vehiculo['Alto_Interior_mm']), int(vehiculo['Largo_Interior_mm']), int(vehiculo['Carga_Max_kg'])))
+        # Solo 1 camión en modo análisis
+        packer.add_bin(RotationLimitedBin(vehiculo['Tipo'], int(vehiculo['Ancho_Interior_mm']), int(vehiculo['Alto_Interior_mm']), int(vehiculo['Largo_Interior_mm']), int(vehiculo['Carga_Max_kg'])))
         
         for it in items_load: packer.add_item(it)
         packer.pack()
         
-        b = packer.bins[0] # El único camión
+        b = packer.bins[0]
         
-        # --- RESULTADOS ---
+        # RESULTADOS
         st.divider()
         c1, c2, c3 = st.columns(3)
-        c1.metric("Bultos que CABEN", len(b.items))
-        c2.metric("Bultos FUERA (No caben)", len(b.unfitted_items), delta_color="inverse")
+        c1.metric("Bultos DENTRO", len(b.items))
+        c2.metric("Bultos FUERA", len(b.unfitted_items), delta_color="inverse")
         
-        # Ocupación Real
-        if len(b.items) > 0:
-            v_real = sum([i.width * i.height * i.depth for i in b.items])
-            pct_real = (v_real / vol_camion) * 100
-            c3.metric("Ocupación Real 3D", f"{round(pct_real, 1)}%")
-        else:
-            c3.metric("Ocupación Real", "0%")
+        v_real = sum([float(i.width) * float(i.height) * float(i.depth) for i in b.items])
+        # CORRECCIÓN ERROR TYPE: Convertimos todo a float explícitamente antes de dividir
+        try:
+            pct = (float(v_real) / float(vol_camion)) * 100
+        except: pct = 0
+            
+        c3.metric("Ocupación Real", f"{round(pct, 1)}%")
 
-        # VISUALIZACIÓN
-        st.subheader("Vista 3D (Carga Real)")
+        st.subheader("Vista 3D (Sin Vuelcos)")
         if len(b.items) > 0:
-            st.plotly_chart(draw_truck_analysis(b, b.width, b.height, b.depth), use_container_width=True)
+            st.plotly_chart(draw_truck_final(b, b.width, b.height, b.depth), use_container_width=True)
         else:
-            st.warning("El camión está vacío. Revisa si el primer bulto es más grande que el camión.")
+            st.warning("Camión vacío.")
 
-        # TABLA DE SOBRANTES
-        if len(b.unfitted_items) > 0:
-            st.error(f"❌ **{len(b.unfitted_items)} Bultos se han quedado fuera.**")
-            with st.expander("Ver lista de lo que NO cabe"):
-                data_err = [{"Ref": x.name, "Medidas": f"{int(x.width)}x{int(x.depth)}x{int(x.height)}"} for x in b.unfitted_items]
-                st.dataframe(pd.DataFrame(data_err))
+        if b.unfitted_items:
+            st.error(f"❌ {len(b.unfitted_items)} bultos no han cabido.")
 else:
     st.info("Sube Excel.")
